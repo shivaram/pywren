@@ -2,7 +2,7 @@
 Benchmark shuffles using local SSD S3
 
 Run this on every server. 
-$ python ssd_shuffle_benchmark.py shuffle --workers=<workers-file-name> --mb_per_file=1000
+$ python s3_server_shuffle_benchmark.py shuffle --workers=<workers-file-name> --mb_per_file=1000
 
 Saves the output in a pickled list of IO transfer times. 
 
@@ -35,15 +35,18 @@ def cli():
 @click.option('--mb_per_file', help='MB of each object in S3', type=float)
 @click.option('--workers', help='file name containing workers', type=str)
 @click.option('--port', help='port number for http server to listen', type=int)
-@click.option('--shuffle_dir_name', help='dir to save shuffle files in', default='/mnt')
+@click.option('--bucket_name', help='bucket to save shuffle files in')
 @click.option('--outfile', default='ssd_benchmark.shuffle.output.pickle',
               help='filename to save results in')
-def shuffle(mb_per_file, workers, port, shuffle_dir_name, outfile):
+@click.option('--region', default='us-west-2', help="AWS Region")
+def shuffle(mb_per_file, workers, port, bucket_name, outfile, region):
 
     # print "mb_per_file =", mb_per_file
     # print "workers=", workers
     # print "shuffle_dir_name =", shuffle_dir_name
     my_hostname = socket.gethostname().strip()
+
+    client = boto3.client('s3', region)
     # print "my hostname ", my_hostname
 
     bytes_n = int(mb_per_file * 1024**2)
@@ -72,13 +75,9 @@ def shuffle(mb_per_file, workers, port, shuffle_dir_name, outfile):
       if i != my_worker_id:
         d = exampleutils.RandomDataGenerator(bytes_n)
         key_name = 'shuffle_' + str(my_worker_id) + '_' + str(i)
-        outf = open(shuffle_dir_name + '/' + key_name, 'w')
-        block = d.read(block_size)
-        while block != "":
-          outf.write(block)
-          block = d.read(block_size)
-        outf.flush()
-        outf.close()
+        client.put_object(Bucket=bucket_name, 
+                          Key = key_name,
+                          Body=d)
 
     t2 = time.time()
 
@@ -95,18 +94,16 @@ def shuffle(mb_per_file, workers, port, shuffle_dir_name, outfile):
       m = hashlib.md5()
       block_id = blocks_to_read.pop()
       key = 'shuffle_' + str(block_id) + '_' + str(my_worker_id)
-      host_port = hostname_id_map[block_id]
-      conn = httplib.HTTPConnection(host_port[0] + ":" + host_port[1])
-      conn.request("GET", key)
-      r1 = conn.getresponse()
-      if r1.status == 200:
-        buf = r1.read(block_size)
+      try:
+        obj = client.get_object(Bucket=bucket_name, Key=key)
+        fileobj = obj['Body']
+        buf = fileobj.read(block_size)
         while len(buf) > 0:
           bytes_read += len(buf)
           m.update(buf)
-          buf = r1.read(block_size)
-      else:
-        # print 'Failed to get ', key, ' status ', r1.status, ' reason ', r1.reason
+          buf = fileobj.read(block_size)
+      except botocore.exceptions.ClientError as e:
+        # print 'Failed to get ', block_id, ' error ', e.msg
         blocks_to_read.append(block_id)
 
 
@@ -114,8 +111,17 @@ def shuffle(mb_per_file, workers, port, shuffle_dir_name, outfile):
     t4 = time.time()
     read_mb_rate = bytes_read/(t4-t3)/1e6
 
+    blocks_to_read = list(range(num_workers))
+    blocks_to_read.remove(my_worker_id)
+    blocks_to_read = deque(blocks_to_read)
+    while blocks_to_read:
+      block_id = blocks_to_read.pop()
+      key = 'shuffle_' + str(block_id) + '_' + str(my_worker_id)
+      obj = client.delete_object(Bucket=bucket_name, Key=key)
+
     res = (t1, t2, write_mb_rate, t3, t4, read_mb_rate)
     print ",".join(map(str, res))
+    #print res
     #pickle.dump(res, open(outfile + str(my_worker_id), 'w'))
 
 if __name__ == '__main__':

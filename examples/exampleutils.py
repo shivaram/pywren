@@ -27,11 +27,11 @@ class RandomDataGenerator(object):
                                               size=self.BLOCK_SIZE_BYTES)
 
     def tell(self):
-        print "tell", self.pos
+        # print "tell", self.pos
         return self.pos
 
     def seek(self, pos, whence=0):
-        print "seek","pos=", pos, "whence=", whence
+        # print "seek","pos=", pos, "whence=", whence
         if whence == 0:
             self.pos = pos
         elif whence == 1:
