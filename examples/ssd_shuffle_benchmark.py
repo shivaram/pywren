@@ -12,6 +12,7 @@ import time
 import boto3 
 import botocore
 import uuid
+import httplib
 
 import time
 import pywren
@@ -37,12 +38,12 @@ def cli():
 @click.option('--shuffle_dir_name', help='dir to save shuffle files in', default='/mnt')
 @click.option('--outfile', default='ssd_benchmark.shuffle.output.pickle',
               help='filename to save results in')
-def shuffle(mb_per_file, workers, shuffle_dir_name, outfile):
+def shuffle(mb_per_file, workers, port, shuffle_dir_name, outfile):
 
     print "mb_per_file =", mb_per_file
     print "workers=", workers
     print "shuffle_dir_name =", shuffle_dir_name
-    my_hostname = socket.gethostname()
+    my_hostname = socket.gethostname().strip()
     print "my hostname ", my_hostname
 
     bytes_n = int(mb_per_file * 1024**2)
@@ -51,14 +52,20 @@ def shuffle(mb_per_file, workers, shuffle_dir_name, outfile):
     hostname_id_map = {}
     id_cur = 0
     my_worker_id = -1
-    with open('workers', 'r') as f:
-      host_port = split(f.readline(), ':')
-      hostname_id_map[id_cur] = (host_port[0], host_port[1])
-      if host_port[0] == my_worker_id and host_port[1] = str(port):
-        my_worker_id = id_cur
-      id_cur = id_cur + 1
+    with open(workers, 'r') as f:
+      lines = f.readlines()
+      for line in lines:
+          host_port = line.strip().split(':')
+          hostname_id_map[id_cur] = (host_port[0], host_port[1])
+          if host_port[0] == my_hostname and host_port[1] == str(port):
+            my_worker_id = id_cur
+          print "Used ", id_cur
+          id_cur = id_cur + 1 
 
-    num_workers = id_cur + 1
+    num_workers = id_cur
+
+    print "my worker_id ", my_worker_id
+    print "num_workers ", num_workers
 
     t1 = time.time()
     for i in xrange(0, num_workers):
@@ -75,12 +82,12 @@ def shuffle(mb_per_file, workers, shuffle_dir_name, outfile):
 
     t2 = time.time()
 
-    write_mb_rate = bytes_n * (workers - 1)/(t2-t1)/1e6
+    write_mb_rate = bytes_n * (num_workers - 1)/(t2-t1)/1e6
 
     # Read in 
     t3 = time.time()
     bytes_read = 0
-    blocks_to_read = list(range(workers))
+    blocks_to_read = list(range(num_workers))
     blocks_to_read.remove(my_worker_id)
     blocks_to_read = deque(blocks_to_read)
 
@@ -89,7 +96,7 @@ def shuffle(mb_per_file, workers, shuffle_dir_name, outfile):
       block_id = blocks_to_read.pop()
       key = 'shuffle_' + str(block_id) + '_' + str(my_worker_id)
       host_port = hostname_id_map[block_id]
-      conn = http.client.HTTPConnection(host_port[0] + ":" + host_port[1])
+      conn = httplib.HTTPConnection(host_port[0] + ":" + host_port[1])
       conn.request("GET", key)
       r1 = conn.getresponse()
       if r1.status == 200:
@@ -97,17 +104,19 @@ def shuffle(mb_per_file, workers, shuffle_dir_name, outfile):
         while len(buf) > 0:
           bytes_read += len(buf)
           m.update(buf)
-          buf = r1.read(blocksize)
+          buf = r1.read(block_size)
       else:
         print 'Failed to get ', key, ' status ', r1.status, ' reason ', r1.reason
         blocks_to_read.append(block_id)
 
 
+    print "Finished reading ", bytes_read
     t4 = time.time()
     read_mb_rate = bytes_read/(t4-t3)/1e6
 
-    res = [f.result() for f in fut]
-    pickle.dump(res, open(outfile, 'w'))
+    res = (t1, t2, write_mb_rate, t3, t4, read_mb_rate)
+    print res
+    #pickle.dump(res, open(outfile + str(my_worker_id), 'w'))
 
 if __name__ == '__main__':
     cli()
