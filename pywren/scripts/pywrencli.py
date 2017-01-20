@@ -77,15 +77,19 @@ def create_role():
     """
     
     """
-
     config = pywren.wrenconfig.default()
-    print "config=", config
+
     iamclient = boto3.resource('iam')
     json_policy = json.dumps(pywren.wrenconfig.basic_role_policy)
     role_name = config['account']['aws_lambda_role']
     role = iamclient.create_role(RoleName=role_name, 
                                  AssumeRolePolicyDocument=json_policy)
     more_json_policy = json.dumps(pywren.wrenconfig.more_permissions_policy)
+    
+    AWS_ACCOUNT_ID = config['account']['aws_account_id']
+    AWS_REGION = config['account']['aws_region']
+    more_json_policy = more_json_policy.replace("AWS_ACCOUNT_ID", str(AWS_ACCOUNT_ID))
+    more_json_policy = more_json_policy.replace("AWS_REGION", AWS_REGION)
 
     iamclient.RolePolicy(role_name, '{}-more-permissions'.format(role_name)).put(
         PolicyDocument=more_json_policy)
@@ -202,3 +206,45 @@ def test_lambda():
     """
 
     config = pywren.wrenconfig.default()
+
+@cli.command()
+def print_latest_logs():
+    """
+    Print the latest log group and log stream. 
+
+    Note this does not contain support for going back further in history, 
+    use the CloudWatch Logs web GUI for that. 
+    """
+
+
+    config = pywren.wrenconfig.default()
+
+    logclient = boto3.client('logs', region_name=config['account']['aws_region'])
+
+    logGroupName = "/aws/lambda/{}".format(config['lambda']['function_name'])
+
+    response = logclient.describe_log_streams(
+        logGroupName=logGroupName,
+        orderBy='LastEventTime',
+        descending=True)
+
+    latest_logStreamName = response['logStreams'][0]['logStreamName']
+
+
+    response = logclient.get_log_events(
+        logGroupName=logGroupName,
+        logStreamName=latest_logStreamName,)
+
+    for event in response['events']:
+        print "{} : {}".format(event['timestamp'], event['message'].strip())
+
+@cli.command()
+def log_url():
+    """
+    return the cloudwatch log URL
+    """
+    config = pywren.wrenconfig.default()
+    function_name = config['lambda']['function_name']
+    aws_region = config['account']['aws_region']
+    url = "https://{}.console.aws.amazon.com/cloudwatch/home?region={}#logStream:group=/aws/lambda/{}".format(aws_region, aws_region, function_name)
+    print url

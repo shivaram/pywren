@@ -22,7 +22,8 @@ unique_instance_name = 'pywren_builder'
 #s3url = "s3://ericmjonas-public/condaruntime.nomkl_sklearn.tar.gz"
 #s3url = "s3://ericmjonas-public/condaruntime.mkl.avx.tar.gz"
 #s3url = "s3://ericmjonas-public/condaruntime.nomkl.tar.gz"
-s3url = "s3://ericmjonas-public/condaruntime.stripped.scipy.mkl_avx2.tar.gz"
+s3url = "s3://ericmjonas-public/condaruntime.stripped.scipy-cvxpy-sklearn.mkl_avx2.tar.gz"
+#s3url = "s3://ericmjonas-public/condaruntime.minimal.tar.gz"
 
 def tags_to_dict(d):
     return {a['Key'] : a['Value'] for a in d}
@@ -104,11 +105,13 @@ def conda_setup_mkl_avx2():
         run("wget https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh -O miniconda.sh ")
         run("bash miniconda.sh -b -p /tmp/conda/condaruntime")
         with path("/tmp/conda/condaruntime/bin", behavior="prepend"):
-            run("conda install -q -y numpy enum34 pytest Click numba boto3 PyYAML cython boto scipy pillow")
+            run("conda install -q -y numpy enum34 pytest Click numba boto3 PyYAML cython boto scipy pillow cvxopt scikit-learn")
             run("conda list")
             #run("conda clean -y -i -t -p")
             run("pip install --upgrade cloudpickle")
-            
+            run("pip install cvxpy")
+            run("pip install redis")
+
 @task
 def conda_setup_nomkl():
     run("rm -Rf /tmp/conda")
@@ -120,6 +123,16 @@ def conda_setup_nomkl():
             run("conda install -q -y nomkl numpy enum34 pytest Click numba boto3 PyYAML cython")
             run("conda list")
             run("pip install --upgrade cloudpickle glob2")
+            
+@task
+def conda_setup_minimal():
+    run("rm -Rf /tmp/conda")
+    run("mkdir -p /tmp/conda")
+    with cd("/tmp/conda"):
+        run("wget https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh -O miniconda.sh ")
+        run("bash miniconda.sh -b -p /tmp/conda/condaruntime")
+        with path("/tmp/conda/condaruntime/bin", behavior="prepend"):
+            run("conda install -q -y nomkl numpy boto3 boto") # Numpy is required
             
 
 @task

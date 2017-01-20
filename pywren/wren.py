@@ -14,7 +14,6 @@ import logging
 import botocore
 import glob2
 import os
-import numpy as np
 from cloudpickle import serialize
 
 logger = logging.getLogger(__name__)
@@ -97,6 +96,7 @@ class Executor(object):
                     'callset_id': callset_id, 
                     'data_byte_range' : data_byte_range, 
                     'call_id' : call_id, 
+                    'lambda_function_name' : self.lambda_function_name, 
                     'use_cached_runtime' : use_cached_runtime, 
                     'runtime_s3_bucket' : self.config['runtime']['s3_bucket'], 
                     'runtime_s3_key' : self.config['runtime']['s3_key']}    
@@ -127,7 +127,7 @@ class Executor(object):
 
         logger.info("call_async {} {} lambda invoke complete".format(callset_id, call_id))
 
-
+        
         host_job_meta.update(arg_dict)
 
         fut = ResponseFuture(call_id, callset_id, self, host_job_meta)
@@ -162,6 +162,8 @@ class Executor(object):
         to False, redownloads runtime.
         """
 
+        host_job_meta = {}
+
         pool = ThreadPool(invoke_pool_threads)
         callset_id = s3util.create_callset_id()
         data = list(iterdata)
@@ -172,10 +174,10 @@ class Executor(object):
         
         func_str = func_and_data_ser[0]
         data_strs = func_and_data_ser[1:]
-        data_size_bytes = np.sum(len(x) for x in data_strs)
+        data_size_bytes = sum(len(x) for x in data_strs)
         s3_agg_data_key = None
-        host_job_meta = {'aggregated_data_in_s3' : False, 
-                         'data_size_bytes' : data_size_bytes}
+        host_job_meta['aggregated_data_in_s3'] = False
+        host_job_meta['data_size_bytes'] =  data_size_bytes
         
         if data_size_bytes < wrenconfig.MAX_AGG_DATA_SIZE and data_all_as_one:
             s3_agg_data_key = s3util.create_agg_data_key(self.s3_bucket, 
@@ -187,6 +189,7 @@ class Executor(object):
                                      Body = agg_data_bytes)
             host_job_meta['agg_data_in_s3'] = True
             host_job_meta['data_upload_time'] = time.time() - agg_upload_time
+            host_job_meta['data_upload_timestamp'] = time.time()
         else:
             # FIXME add warning that you wanted data all as one but 
             # it exceeded max data size 
@@ -198,13 +201,16 @@ class Executor(object):
         ### Create func and upload 
         func_module_str = pickle.dumps({'func' : func_str, 
                                         'module_data' : module_data}, -1)
+        host_job_meta['func_module_str_len'] = len(func_module_str)
 
+        func_upload_time = time.time()
         s3_func_key = s3util.create_func_key(self.s3_bucket, self.s3_prefix, 
                                              callset_id)
         self.s3client.put_object(Bucket = s3_func_key[0], 
                                  Key = s3_func_key[1], 
                                  Body = func_module_str)
-
+        host_job_meta['func_upload_time'] = time.time() - func_upload_time
+        host_job_meta['func_upload_timestamp'] = time.time()
         def invoke(data_str, callset_id, call_id, s3_func_key, 
                    host_job_meta, 
                    s3_agg_data_key = None, data_byte_range=None ):
@@ -212,13 +218,16 @@ class Executor(object):
                 = s3util.create_keys(self.s3_bucket,
                                      self.s3_prefix, 
                                      callset_id, call_id)
-            
+
+            host_job_meta['job_invoke_timestamp'] = time.time()
+
             if s3_agg_data_key is None:
                 data_upload_time = time.time()
                 self.put_data(s3_data_key, data_str, 
                               callset_id, call_id)
                 data_upload_time = time.time() - data_upload_time
                 host_job_meta['data_upload_time'] = data_upload_time
+                host_job_meta['data_upload_timestamp'] = time.time()
 
                 data_key = s3_data_key
             else:
@@ -229,7 +238,7 @@ class Executor(object):
                                          s3_status_key, 
                                          callset_id, call_id, extra_env, 
                                          extra_meta, data_byte_range, 
-                                         use_cached_runtime, {})
+                                         use_cached_runtime, host_job_meta.copy())
 
         N = len(data)
         call_result_objs = []
@@ -262,6 +271,41 @@ class Executor(object):
         return res
     
     
+    def get_logs(self, future):
+
+
+        logclient = boto3.client('logs', region_name=self.aws_region)
+
+
+        log_group_name = future.run_status['log_group_name']
+        log_stream_name = future.run_status['log_stream_name']
+        lambda_function_name = future.invoke_status['lambda_function_name']
+        aws_request_id = future.run_status['aws_request_id']
+
+        log_events = logclient.get_log_events(
+            logGroupName=log_group_name,
+            logStreamName=log_stream_name,)
+
+        this_events_logs = []
+        in_this_event = False
+        for event in log_events['events']:
+            start_string = "START RequestId: {}".format(aws_request_id)
+            end_string = "REPORT RequestId: {}".format(aws_request_id)
+
+            message = event['message'].strip()
+            timestamp = int(event['timestamp'])
+            if start_string in message:
+                in_this_event = True
+            elif end_string in message:
+                in_this_event = False
+                this_events_logs.append((timestamp, message))
+
+            if in_this_event:
+                this_events_logs.append((timestamp, message))
+
+        return this_events_logs
+
+
     
 def get_call_status(callset_id, call_id, 
                     AWS_S3_BUCKET = wrenconfig.AWS_S3_BUCKET, 
@@ -386,7 +430,7 @@ class ResponseFuture(object):
                                           AWS_REGION = self.executor.aws_region, 
                                           s3 = self.executor.s3client)
             self.status_query_count += 1
-
+        self._invoke_metadata['status_done_timestamp'] = time.time()
         self._invoke_metadata['status_query_count'] = self.status_query_count
             
         # FIXME check if it actually worked all the way through 
@@ -400,7 +444,7 @@ class ResponseFuture(object):
         call_output_time_done = time.time()
         self._invoke_metadata['download_output_time'] = call_output_time_done - call_output_time_done
         
-
+        self._invoke_metadata['download_output_timestamp'] = call_output_time_done
         call_success = call_invoker_result['success']
         logger.info("ResponseFuture.result() {} {} call_success {}".format(self.callset_id, 
                                                                            self.call_id, 
