@@ -1,12 +1,9 @@
 """
 Benchmark aggregate read/write performance to S3
 
-$ python s3_benchmark.py read --bucket_name=jonas-pywren-benchmark   --number=800 --key_file=big_keys.txt
-
-$ python s3_benchmark.py write --bucket_name=jonas-pywren-benchmark   --mb_per_file=1000 --number=800 --key_file=big_keys.txt
+$ python s3_shuffle_benchmark.py write --bucket_name=jonas-pywren-benchmark   --mb_per_file=1000 --number=800 --key_file=big_keys.txt
 
 Saves the output in a pickled list of IO transfer times. 
-
 
 Note that you want to write to the root
 of an s3 bucket (no prefix) to get maximum
@@ -39,27 +36,29 @@ def cli():
 
 @cli.command()
 @click.option('--bucket_name', help='bucket to save shuffle files in')
-@click.option('--mb_per_file', help='MB of each object in S3', type=int)
+@click.option('--mb_per_file', help='MB of each object in S3', type=float)
 @click.option('--workers', help='number of files', type=int)
 @click.option('--outfile', default='s3_benchmark.shuffle.output.pickle', 
               help='filename to save results in')
+@click.option('--key_prefix', default='shuffle', help="Prefix for keys")
 @click.option('--region', default='us-west-2', help="AWS Region")
 def shuffle(bucket_name, mb_per_file, workers, 
-              outfile, region):
+              outfile, key_prefix, region):
 
     print "bucket_name =", bucket_name
     print "mb_per_file =", mb_per_file
     print "workers=", workers
+    print "key_prefix=", key_prefix
 
     def run_command(my_worker_id):
-        bytes_n = mb_per_file * 1024**2
-
+        bytes_n = int(mb_per_file * 1024**2)
         client = boto3.client('s3', region)
+
         t1 = time.time()
         for i in xrange(0, workers):
           if i != my_worker_id:
             d = exampleutils.RandomDataGenerator(bytes_n)
-            key_name = 'shuffle_' + str(my_worker_id) + '_' + str(i)
+            key_name = key_prefix + '_' + str(my_worker_id) + '_' + str(i)
             client.put_object(Bucket=bucket_name, 
                               Key = key_name,
                               Body=d)
@@ -78,7 +77,7 @@ def shuffle(bucket_name, mb_per_file, workers,
         while blocks_to_read:
           m = hashlib.md5()
           block_id = blocks_to_read.pop()
-          key = 'shuffle_' + str(block_id) + '_' + str(my_worker_id)
+          key = key_prefix + '_' + str(block_id) + '_' + str(my_worker_id)
           try:
             obj = client.get_object(Bucket=bucket_name, Key=key)
             fileobj = obj['Body']
@@ -88,9 +87,10 @@ def shuffle(bucket_name, mb_per_file, workers,
               m.update(buf)
               buf = fileobj.read(blocksize)
           except botocore.exceptions.ClientError as e:
-            print 'Failed to get ', block_id, ' error ', e.msg
+            print 'Failed to get ', block_id, ' error ', e
             blocks_to_read.append(block_id)
 
+        print 'Bytes read ' + str(bytes_read)
 
         t4 = time.time()
         read_mb_rate = bytes_read/(t4-t3)/1e6
